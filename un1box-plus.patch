@@ -1,0 +1,719 @@
+diff --git a/Android/UN1BOX-PLUS.md b/Android/UN1BOX-PLUS.md
+new file mode 100644
+index 0000000..d514a35
+--- /dev/null
++++ b/Android/UN1BOX-PLUS.md
+@@ -0,0 +1,26 @@
++# Un1box Plus
++
++Un1box Plus is Un1box with three additions. It installs as its own app (`org.un1box.plus`), beside the original.
++
++- **Better device models.** Each model is drawn as itself: the iPod touch 2G's chrome back, the iPod touch 4G and iPhone 4's flat
++  bands with earpiece and front camera, the iPhone 3G/3GS's glossy black body, the iPhone 2G, the iPad's wide aluminium rim.
++  Edge catch-lights, glass sheen, a recessed panel and a Home button that lights in your accent colour while pressed.
++  A model is one `DeviceSkin` entry in `DeviceFrame.kt`; the board name picks it.
++- **Accent colour.** Settings > Display > Accent colour: eight presets and a slider for any hue. Every shade (buttons, switches,
++  containers, the glow behind the device, gradients) is derived from the one colour in `Theme.kt` (`AccentPalette`), so any choice stays readable
++  in light and dark. It applies immediately and is remembered.
++- **Import from Un1box.** Settings > Device > Import from Un1box copies saved devices with their own storage (installed apps, data)
++  from a copy of the original's `library` folder. Already-imported devices are skipped; a device is only added once it has copied completely.
++
++## Moving devices from the original
++
++Android keeps an app's files private, so there are two routes:
++
++1. **Side by side:** stop the device in the original, run `tools/export-from-original.sh` (needs a debuggable original or root),
++   push the folder to the phone, then Settings > Import from Un1box and pick it.
++2. **Install over:** build with `-PreplaceOriginal=true`. Plus then keeps the original's application id and installs over it
++   (same signing key required), so every device is already there.
++
++## Building
++
++As in `Android/BUILD-AND-RUN.md`; nothing else changes. `-PreplaceOriginal=true` is the only new option.
+diff --git a/Android/app/build.gradle.kts b/Android/app/build.gradle.kts
+index 4ecf3f2..fdc61ba 100644
+--- a/Android/app/build.gradle.kts
++++ b/Android/app/build.gradle.kts
+@@ -18,7 +18,10 @@ android {
+     buildToolsVersion = "35.0.0"
+     ndkVersion = "28.2.13676358"
+     defaultConfig {
+-        applicationId = "org.un1box.android"
++        // Un1box Plus is its own application, org.un1box.plus, so it installs beside the original Un1box and
++        // moves devices across with Settings > Import from Un1box. -PreplaceOriginal=true keeps the original's
++        // id instead: Plus then installs over it (same signing key needed) and every device is simply still there.
++        applicationId = if (providers.gradleProperty("replaceOriginal").orElse("false").get().toBoolean()) "org.un1box.android" else "org.un1box.plus"
+         // The jailbreak build is its own application, org.un1box.android.jb: a phone can hold it beside the
+         // normal one (its own data -- devices are prepared again inside it -- its own signing key, and its own
+         // name in a launcher, below), which installing over the normal one could not do.
+@@ -28,10 +31,10 @@ android {
+         versionCode = 13
+         // Which build is running, in Settings and in a profile: the jailbreak app id already tells them
+         // apart, and this is what a person reads off the phone.
+-        versionName = "0.0.13" + (if (jailbreak) "-jailbreak" else "")
++        versionName = "0.0.13-plus.1" + (if (jailbreak) "-jailbreak" else "")
+         // The launcher label, through a resource because a manifest string cannot be renamed per build:
+         // two "Un1box" icons side by side would be a guess, not a choice.
+-        resValue("string", "app_name", if (jailbreak) "Un1box JB" else "Un1box")
++        resValue("string", "app_name", if (jailbreak) "Un1box Plus JB" else "Un1box Plus")
+         buildConfigField("long", "SHUTDOWN_GRACE_MS", "${shutdownGraceMs}L")
+         buildConfigField("boolean", "JAILBREAK", "$jailbreak")
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+diff --git a/Android/app/src/main/java/org/un1box/android/AppSettings.kt b/Android/app/src/main/java/org/un1box/android/AppSettings.kt
+index 0b17d48..0713a1f 100644
+--- a/Android/app/src/main/java/org/un1box/android/AppSettings.kt
++++ b/Android/app/src/main/java/org/un1box/android/AppSettings.kt
+@@ -49,6 +49,13 @@ class AppSettings(context: Context) {
+     private val languageState = enumPref("language", UiLanguage.AUTO)
+     var language: UiLanguage get() = languageState.value; set(v) { languageState.value = v; prefs.edit().putString("language", v.name).apply() }
+ 
++    /* Un1box Plus: the accent colour (ARGB), applied to the whole UI as soon as it changes. */
++    var accent: Int
++        get() = AccentPalette.seed
++        set(v) { AccentPalette.seed = v; prefs.edit().putInt("accent", v or 0xFF000000.toInt()).apply() }
++
++    init { AccentPalette.seed = prefs.getInt("accent", AccentPalette.DEFAULT) }
++
+     private val themeState = enumPref("theme", ThemeMode.SYSTEM)
+     var theme: ThemeMode get() = themeState.value; set(v) { themeState.value = v; prefs.edit().putString("theme", v.name).apply() }
+ 
+diff --git a/Android/app/src/main/java/org/un1box/android/DeviceFrame.kt b/Android/app/src/main/java/org/un1box/android/DeviceFrame.kt
+index 822df58..729ab8f 100644
+--- a/Android/app/src/main/java/org/un1box/android/DeviceFrame.kt
++++ b/Android/app/src/main/java/org/un1box/android/DeviceFrame.kt
+@@ -9,9 +9,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.runtime.*
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.drawBehind
+ import androidx.compose.ui.draw.shadow
++import androidx.compose.ui.geometry.CornerRadius
++import androidx.compose.ui.geometry.Offset
+ import androidx.compose.ui.graphics.Brush
+ import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.Path
++import androidx.compose.ui.graphics.drawscope.Stroke
++import androidx.compose.ui.graphics.lerp
+ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+ import androidx.compose.ui.input.pointer.pointerInput
+ import androidx.compose.ui.platform.LocalDensity
+@@ -30,6 +36,10 @@ internal object GuestButton { const val HOME = 0; const val POWER = 1; const val
+ /**
+  * Physical outline of the emulated device, in millimetres. The screen rectangle is placed so
+  * the guest surface gets exactly the panel's aspect, so the presenter never letterboxes.
++ *
++ * Un1box Plus draws each model as itself: the metal or plastic of its body, the glass over it, the
++ * speaker slot and camera where that model has them. Everything is drawn from these numbers, so a
++ * new model is one more entry, not new artwork.
+  */
+ internal data class DeviceSkin(
+     val width: Float, val height: Float, val corner: Float,
+@@ -41,26 +51,45 @@ internal data class DeviceSkin(
+     val power: Pair<Float, Float>? = null,
+     /** Volume on the right edge (the iPad), and each button's top and length; null keeps the phones'. */
+     val volumeRight: Boolean = false, val volumeUp: Pair<Float, Float>? = null, val volumeDown: Pair<Float, Float>? = null,
++    /** Earpiece slot above the screen (the phones, and the iPod touch with a camera). */
++    val speaker: Boolean = false,
++    /** Front camera beside the earpiece. */
++    val camera: Boolean = false,
++    /** A glossy body (the iPhone 3G/3GS in black) shows a bright reflection along its edge; metal shows a soft highlight. */
++    val glossy: Boolean = false,
+ ) {
+     companion object {
+         // iPod touch 2nd generation: 110 x 61.8 mm, 3.5" 320x480 panel, black glass, chrome back.
+         val ipodTouch2 = DeviceSkin(61.8f, 110f, 8.5f, 5.95f, 17.6f, 49.9f, 74.8f, 101.4f, 10.5f,
+-            Color(0xFF0B0B0C), listOf(Color(0xFFE8E8EA), Color(0xFF8E8E93), Color(0xFFD1D1D6)))
+-        // iPod touch 4th generation: 111 x 58.9 mm, 3.5" panel, flatter rim.
++            Color(0xFF0B0B0C), listOf(Color(0xFFF4F4F6), Color(0xFF8E8E93), Color(0xFFE2E2E6), Color(0xFF9C9CA2)))
++        // iPod touch 4th generation: 111 x 58.9 mm, 3.5" panel, flatter rim, front camera.
+         val ipodTouch4 = DeviceSkin(58.9f, 111f, 7.5f, 4.5f, 18.1f, 49.9f, 74.8f, 102.3f, 9.6f,
+-            Color(0xFF0B0B0C), listOf(Color(0xFFD9D9DC), Color(0xFF9A9AA0), Color(0xFFC7C7CC)))
+-        val iphone = DeviceSkin(62.1f, 115.5f, 9f, 6.1f, 20.3f, 49.9f, 74.8f, 105.6f, 10.5f,
+-            Color(0xFF0B0B0C), listOf(Color(0xFFC7C7CC), Color(0xFF6E6E73), Color(0xFFAEAEB2)))
++            Color(0xFF0B0B0C), listOf(Color(0xFFE6E6EA), Color(0xFF9A9AA0), Color(0xFFD6D6DB), Color(0xFFA8A8AE)),
++            speaker = true, camera = true)
++        // iPhone 2G: 115 x 61 mm, aluminium back with a black plastic lower edge.
++        val iphone2g = DeviceSkin(61f, 115f, 9f, 5.55f, 20.3f, 49.9f, 74.8f, 105.6f, 10.5f,
++            Color(0xFF0B0B0C), listOf(Color(0xFFDADADF), Color(0xFF7C7C82), Color(0xFFC4C4CA), Color(0xFF8A8A90)),
++            speaker = true)
++        // iPhone 3G / 3GS: 115.5 x 62.1 mm, curved black plastic back, silver ring around the glass.
++        val iphone = DeviceSkin(62.1f, 115.5f, 9.5f, 6.1f, 20.3f, 49.9f, 74.8f, 105.6f, 10.5f,
++            Color(0xFF0B0B0C), listOf(Color(0xFF55555B), Color(0xFF1B1B1E), Color(0xFF3A3A3F), Color(0xFF151517)),
++            rimWidth = 0.9f, speaker = true, glossy = true)
++        // iPhone 4: 115.2 x 58.6 mm, flat stainless-steel band between two sheets of glass, square-ish corners.
++        val iphone4 = DeviceSkin(58.6f, 115.2f, 7.2f, 4.35f, 20.2f, 49.9f, 74.8f, 105.4f, 10.2f,
++            Color(0xFF060607), listOf(Color(0xFFEDEDF0), Color(0xFF85858B), Color(0xFFD9D9DD), Color(0xFF6E6E74), Color(0xFFCFCFD4)),
++            rimWidth = 1.1f, speaker = true, camera = true)
+         // iPad (first generation): 242.8 x 189.7 mm, 9.7" 4:3 panel (197.1 x 147.8 mm) centred in the glass, a wide
+         // aluminium rim, Sleep/Wake at the top right and the volume rocker on the right edge below the side switch.
+         val ipad = DeviceSkin(189.7f, 242.8f, 13f, 20.95f, 22.85f, 147.8f, 197.1f, 231.4f, 11.5f,
+-            Color(0xFF0B0B0C), listOf(Color(0xFFD1D1D6), Color(0xFF8E8E93), Color(0xFFC7C7CC)),
++            Color(0xFF0B0B0C), listOf(Color(0xFFE2E2E6), Color(0xFF8E8E93), Color(0xFFD6D6DA), Color(0xFF9C9CA2)),
+             rimWidth = 2.4f, power = 156f to 12f, volumeRight = true, volumeUp = 45f to 12f, volumeDown = 57.5f to 12f)
+         fun forBoard(board: String?): DeviceSkin = when {
+             board == null -> ipodTouch2
+             board.startsWith("n81") -> ipodTouch4
+             board.startsWith("k48") -> ipad
+-            board.startsWith("m68") || board.startsWith("n82") || board.startsWith("n88") || board.startsWith("n90") -> iphone
++            board.startsWith("m68") -> iphone2g
++            board.startsWith("n90") || board.startsWith("n92") -> iphone4
++            board.startsWith("n82") || board.startsWith("n88") -> iphone
+             else -> ipodTouch2
+         }
+     }
+@@ -93,14 +122,42 @@ internal fun DeviceFrame(skin: DeviceSkin, enabled: Boolean, button: (Int, Boole
+         val feedback = LocalHapticFeedback.current
+         val haptic = { if (haptics) feedback.performHapticFeedback(HapticFeedbackType.LongPress) }
+         Box(Modifier.size(mm(skin.width + 2 * margin), mm(skin.height + 2 * margin))) {
+-            for ((_, _, r) in buttons)
+-                Box(Modifier.offset(mm(r[0]), mm(r[1])).size(mm(r[2]), mm(r[3])).background(Brush.linearGradient(skin.rim), RoundedCornerShape(mm(0.8f))))
++            // Side buttons: the body's metal, edged darker so each reads as a separate part under the rim.
++            for ((_, _, r) in buttons) {
++                val shape = RoundedCornerShape(mm(0.8f))
++                Box(Modifier.offset(mm(r[0]), mm(r[1])).size(mm(r[2]), mm(r[3]))
++                    .background(Brush.linearGradient(skin.rim), shape).border(mm(0.15f), Color.Black.copy(alpha = 0.45f), shape))
++            }
+             val body = RoundedCornerShape(mm(skin.corner))
++            val faceShape = RoundedCornerShape(mm(skin.corner - skin.rimWidth))
+             Box(Modifier.offset(mm(margin), mm(margin)).size(mm(skin.width), mm(skin.height))
+-                .shadow(mm(4f), body, ambientColor = Color.Black, spotColor = Color.Black)
+-                .background(Brush.linearGradient(skin.rim), body).padding(mm(skin.rimWidth))
+-                .background(skin.face, RoundedCornerShape(mm(skin.corner - skin.rimWidth)))) {
+-                screen(Modifier.offset(mm(skin.screenLeft - skin.rimWidth), mm(skin.screenTop - skin.rimWidth)).size(mm(skin.screenWidth), mm(skin.screenHeight)))
++                .shadow(mm(5f), body, ambientColor = Color.Black, spotColor = Color.Black)
++                .background(Brush.linearGradient(skin.rim), body)
++                .drawBehind { drawRim(skin, mm(skin.corner).toPx(), mm(skin.rimWidth).toPx()) }
++                .padding(mm(skin.rimWidth))
++                .background(Brush.verticalGradient(listOf(lerp(skin.face, Color.White, 0.06f), skin.face, lerp(skin.face, Color.Black, 0.5f))), faceShape)
++                .border(mm(0.25f), Color.White.copy(alpha = 0.09f), faceShape)
++                .drawBehind { drawGlassGloss(mm(skin.corner - skin.rimWidth).toPx()) }) {
++                val bezelTop = skin.screenTop - skin.rimWidth
++                // A hairline of deeper black round the panel, where the LCD meets the glass.
++                val inset = 0.45f
++                Box(Modifier.offset(mm(skin.screenLeft - skin.rimWidth - inset), mm(bezelTop - inset))
++                    .size(mm(skin.screenWidth + 2 * inset), mm(skin.screenHeight + 2 * inset))
++                    .background(Color.Black, RoundedCornerShape(mm(0.6f))).border(mm(0.12f), Color.White.copy(alpha = 0.07f), RoundedCornerShape(mm(0.6f))))
++                screen(Modifier.offset(mm(skin.screenLeft - skin.rimWidth), mm(bezelTop)).size(mm(skin.screenWidth), mm(skin.screenHeight)))
++                val centreX = skin.width / 2 - skin.rimWidth
++                if (skin.speaker) {
++                    val slotWidth = skin.width * 0.19f; val slotHeight = 1.25f
++                    Box(Modifier.offset(mm(centreX - slotWidth / 2), mm(bezelTop / 2 - slotHeight / 2)).size(mm(slotWidth), mm(slotHeight))
++                        .background(Brush.verticalGradient(listOf(Color(0xFF000000), Color(0xFF2A2A2E))), RoundedCornerShape(mm(slotHeight / 2)))
++                        .border(mm(0.1f), Color.White.copy(alpha = 0.10f), RoundedCornerShape(mm(slotHeight / 2))))
++                }
++                if (skin.camera) {
++                    val lens = 2.4f
++                    Box(Modifier.offset(mm(centreX + skin.width * 0.19f - lens / 2), mm(bezelTop / 2 - lens / 2)).size(mm(lens))
++                        .background(Brush.radialGradient(listOf(Color(0xFF2B3A55), Color(0xFF0A0C12), Color.Black)), CircleShape)
++                        .border(mm(0.15f), Color(0xFF3A3A3F), CircleShape))
++                }
+                 HomeButton(Modifier.offset(mm(skin.width / 2 - skin.homeDiameter / 2 - skin.rimWidth), mm(skin.homeCenterY - skin.homeDiameter / 2 - skin.rimWidth))
+                     .size(mm(skin.homeDiameter)), enabled, button, haptic)
+             }
+@@ -116,6 +173,40 @@ internal fun DeviceFrame(skin: DeviceSkin, enabled: Boolean, button: (Int, Boole
+     }
+ }
+ 
++/**
++ * The edge of the body: a bright catch-light along the upper left, a dark fall-off along the lower right, and, for a glossy
++ * body, one more thin reflection just inside the edge. Drawn over the metal, under the glass.
++ */
++private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawRim(skin: DeviceSkin, corner: Float, rim: Float) {
++    val stroke = (rim * 0.45f).coerceAtLeast(1f)
++    val inset = stroke / 2
++    val radius = CornerRadius((corner - inset).coerceAtLeast(0f))
++    val light = if (skin.glossy) 0.75f else 0.55f
++    drawRoundRect(
++        Brush.linearGradient(
++            0f to Color.White.copy(alpha = light), 0.38f to Color.White.copy(alpha = 0.04f),
++            0.62f to Color.Black.copy(alpha = 0.05f), 1f to Color.Black.copy(alpha = 0.45f),
++            start = Offset.Zero, end = Offset(size.width, size.height)),
++        topLeft = Offset(inset, inset), size = androidx.compose.ui.geometry.Size(size.width - 2 * inset, size.height - 2 * inset),
++        cornerRadius = radius, style = Stroke(stroke))
++    if (skin.glossy) {
++        val gap = stroke * 1.9f
++        drawRoundRect(Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.22f), Color.Transparent)),
++            topLeft = Offset(gap, gap), size = androidx.compose.ui.geometry.Size(size.width - 2 * gap, size.height - 2 * gap),
++            cornerRadius = CornerRadius((corner - gap).coerceAtLeast(0f)), style = Stroke(stroke * 0.5f))
++    }
++}
++
++/** The sheen of the front glass: a soft diagonal wedge from the top, which shows on the bezels around the screen. */
++private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGlassGloss(corner: Float) {
++    val w = size.width; val h = size.height
++    val wedge = Path().apply {
++        moveTo(corner * 0.3f, 0f); lineTo(w * 0.78f, 0f); lineTo(w * 0.22f, h * 0.5f); lineTo(0f, h * 0.5f); lineTo(0f, corner * 0.3f); close()
++    }
++    drawPath(wedge, Brush.linearGradient(listOf(Color.White.copy(alpha = 0.07f), Color.White.copy(alpha = 0f)),
++        start = Offset(0f, 0f), end = Offset(w * 0.5f, h * 0.5f)))
++}
++
+ internal fun Modifier.held(enabled: Boolean, id: Int, button: (Int, Boolean) -> Unit, haptic: () -> Unit) =
+     pointerInput(enabled, id) {
+         if (!enabled) return@pointerInput
+@@ -125,16 +216,20 @@ internal fun Modifier.held(enabled: Boolean, id: Int, button: (Int, Boolean) ->
+         })
+     }
+ 
++/** The Home button: dark glass with a rim light, a rounded-square glyph, and a ring in the accent colour while pressed. */
+ @Composable
+ private fun HomeButton(modifier: Modifier, enabled: Boolean, button: (Int, Boolean) -> Unit, haptic: () -> Unit) {
+     val ring = with(LocalDensity.current) { 1.dp }
++    var pressed by remember { mutableStateOf(false) }
++    val press: (Int, Boolean) -> Unit = { id, down -> pressed = down; button(id, down) }
++    val edge = if (pressed) LtColors.Accent else Color(0xFF3A3A3C)
+     Box(modifier.semantics { contentDescription = "Home"; role = Role.Button }.testTag("device_home")
+-        .background(Brush.radialGradient(listOf(Color(0xFF1C1C1E), Color(0xFF050505))), CircleShape)
+-        .border(ring, Color(0xFF3A3A3C), CircleShape)
+-        .held(enabled, GuestButton.HOME, button, haptic),
++        .background(Brush.radialGradient(listOf(if (pressed) Color(0xFF0A0A0B) else Color(0xFF232326), Color(0xFF050505))), CircleShape)
++        .border(ring * 1.5f, Brush.linearGradient(listOf(edge, Color(0xFF111113), edge.copy(alpha = 0.55f))), CircleShape)
++        .held(enabled, GuestButton.HOME, press, haptic),
+         contentAlignment = Alignment.Center) {
+         BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+-            Box(Modifier.size(maxWidth * 0.34f).border(ring, Color(0xFF8E8E93), RoundedCornerShape(maxWidth * 0.08f)))
++            Box(Modifier.size(maxWidth * 0.34f).border(ring, if (pressed) LtColors.Accent else Color(0xFF8E8E93), RoundedCornerShape(maxWidth * 0.08f)))
+         }
+     }
+ }
+diff --git a/Android/app/src/main/java/org/un1box/android/DeviceTransfer.kt b/Android/app/src/main/java/org/un1box/android/DeviceTransfer.kt
+new file mode 100644
+index 0000000..9904387
+--- /dev/null
++++ b/Android/app/src/main/java/org/un1box/android/DeviceTransfer.kt
+@@ -0,0 +1,134 @@
++package org.un1box.android
++
++import android.content.Context
++import android.net.Uri
++import android.system.Os
++import androidx.documentfile.provider.DocumentFile
++import org.json.JSONObject
++import java.io.File
++import java.io.IOException
++import java.io.RandomAccessFile
++
++/**
++ * Un1box Plus: moves saved devices, with their own storage, across from the original Un1box.
++ *
++ * Android keeps each app's files private, so Plus cannot reach into the original. What it can read is a
++ * copy of the original's `library` folder that the person has put somewhere it can see (tools/export-from-original.sh
++ * makes one over adb). The folder is read through the system picker, one device record at a time:
++ *
++ *  - a record is `records/<id>/{record.json, base/, state/, assets/}`, exactly what the engine's library keeps;
++ *  - each is copied into a hidden staging folder (the engine ignores dot-folders), checked, and only then renamed
++ *    into place, so a failed or cancelled transfer never leaves a half-device in the list;
++ *  - a record whose id is already here is skipped, so running the transfer twice is harmless;
++ *  - zero blocks are not written, so a mostly empty flash image stays as small as it was on the original.
++ */
++internal object DeviceTransfer {
++    /** What one transfer did, in the words Settings shows. */
++    data class Report(val imported: List<String>, val alreadyHere: Int, val failed: List<String>) {
++        val summary: String get() = buildString {
++            append(when (imported.size) { 0 -> "Nothing new to import"; 1 -> "Imported ${imported[0]}"; else -> "Imported ${imported.size} devices" })
++            if (alreadyHere > 0) append(" · $alreadyHere already here")
++            if (failed.isNotEmpty()) append(" · ${failed.size} failed: ${failed.first()}")
++        }
++    }
++
++    private const val CHUNK = 1 shl 16
++    private val ID = Regex("[A-Za-z0-9_-]{1,63}")
++    private const val STAGE_PREFIX = ".record-stage-import-"
++
++    /** The record folders inside whatever the person picked: a library, its `records` folder, or one record. */
++    fun findRecords(picked: DocumentFile): List<DocumentFile> {
++        if (picked.findFile("record.json")?.isFile == true) return listOf(picked)
++        val records = if (picked.name == "records") picked else picked.findFile("records")?.takeIf { it.isDirectory }
++        return records?.listFiles()?.filter { it.isDirectory && it.name?.let { n -> ID.matches(n) } == true && it.findFile("record.json")?.isFile == true }
++            ?.sortedBy { it.name } ?: emptyList()
++    }
++
++    private fun safeName(name: String?): String? =
++        name?.takeIf { it.isNotEmpty() && it != "." && it != ".." && '/' !in it && '\u0000' !in it && '\\' !in it }
++
++    private fun sizeOf(entry: DocumentFile): Long =
++        if (entry.isDirectory) entry.listFiles().sumOf { sizeOf(it) } else entry.length()
++
++    /** Reads `record.json` and refuses anything the engine would: another schema, an id that is not the folder's name. */
++    internal fun validate(json: String, folder: String): JSONObject {
++        val record = JSONObject(json)
++        require(record.optInt("schema") == 1) { "unsupported record schema" }
++        require(record.optString("id") == folder && ID.matches(folder)) { "record id does not match its folder" }
++        require(record.optString("name").isNotEmpty() && record.optString("board").isNotEmpty() && record.optString("build").isNotEmpty()) { "record is incomplete" }
++        return record
++    }
++
++    /** Copies one file, leaving the all-zero blocks as holes so a sparse image keeps its small footprint. */
++    private fun copyFile(context: Context, source: DocumentFile, target: File, onBytes: (Long) -> Unit) {
++        val buffer = ByteArray(CHUNK)
++        context.contentResolver.openInputStream(source.uri)?.use { input ->
++            RandomAccessFile(target, "rw").use { output ->
++                var position = 0L
++                while (true) {
++                    val n = input.read(buffer)
++                    if (n < 0) break
++                    if (!allZero(buffer, n)) { output.seek(position); output.write(buffer, 0, n) }
++                    position += n
++                    onBytes(n.toLong())
++                }
++                output.setLength(position)
++            }
++        } ?: throw IOException("Cannot read ${source.name}")
++    }
++
++    private fun allZero(b: ByteArray, n: Int): Boolean { for (i in 0 until n) if (b[i].toInt() != 0) return false; return true }
++
++    private fun copyTree(context: Context, source: DocumentFile, target: File, onBytes: (Long) -> Unit) {
++        target.mkdirs()
++        for (child in source.listFiles()) {
++            val name = safeName(child.name) ?: throw IOException("Refusing an unsafe file name in ${source.name}")
++            val out = File(target, name)
++            if (child.isDirectory) copyTree(context, child, out, onBytes) else copyFile(context, child, out, onBytes)
++        }
++    }
++
++    /**
++     * Imports every record found under [picked]. [existing] holds the ids already in this library.
++     * Runs on the caller's thread (do not call from the UI thread); [progress] gets a label and 0..1 (or -1 when unknown).
++     */
++    fun import(context: Context, picked: Uri, existing: Set<String>, progress: (String, Float) -> Unit): Report {
++        val root = DocumentFile.fromTreeUri(context, picked) ?: throw IOException("Cannot open that folder")
++        val records = findRecords(root)
++        require(records.isNotEmpty()) { "No Un1box devices found there. Pick the original's library folder (it contains a records folder)." }
++        val library = File(context.filesDir, "library")
++        val destination = File(library, "records").apply { mkdirs() }
++        destination.listFiles { f -> f.name.startsWith(STAGE_PREFIX) }?.forEach { it.deleteRecursively() } // a crashed earlier run
++
++        val imported = mutableListOf<String>(); val failed = mutableListOf<String>(); var already = 0
++        val total = records.filter { it.name !in existing }.sumOf { sizeOf(it) }.coerceAtLeast(1L); var done = 0L
++        for (record in records) {
++            val id = record.name ?: continue
++            if (id in existing || File(destination, id).exists()) { already++; continue }
++            val stage = File(destination, STAGE_PREFIX + System.nanoTime())
++            var label = id
++            try {
++                val meta = validate(context.contentResolver.openInputStream(record.findFile("record.json")!!.uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
++                    ?: throw IOException("Cannot read record.json"), id)
++                label = meta.getString("name")
++                require(record.findFile("base")?.findFile("device.lock.json")?.isFile == true) { "the system image is missing" }
++                copyTree(context, record, stage) { n -> done += n; progress("Importing $label…", (done.toFloat() / total).coerceAtMost(1f)) }
++                // The engine seals a record's assets read-only; do the same once they are all in.
++                File(stage, "assets").takeIf { it.isDirectory }?.let { Os.chmod(it.path, 0b101_000_000) }
++                if (!stage.renameTo(File(destination, id))) throw IOException("Could not place $label in the library")
++                imported += label
++            } catch (e: Exception) {
++                File(stage, "assets").takeIf { it.exists() }?.let { runCatching { Os.chmod(it.path, 0b111_000_000) } }
++                stage.deleteRecursively()
++                failed += "$label (${e.message ?: e.javaClass.simpleName})"
++            }
++        }
++        // First devices in an empty library become the selected one, as the engine's own import does.
++        val selected = File(library, "selected")
++        if (imported.isNotEmpty() && !selected.exists()) {
++            val first = destination.listFiles { f -> !f.name.startsWith(".") && f.isDirectory }?.minOfOrNull { it.name }
++            if (first != null) { val tmp = File(library, "selected.import"); tmp.writeText(first); tmp.renameTo(selected) }
++        }
++        return Report(imported, already, failed)
++    }
++}
+diff --git a/Android/app/src/main/java/org/un1box/android/MainActivity.kt b/Android/app/src/main/java/org/un1box/android/MainActivity.kt
+index 91d161f..045576d 100644
+--- a/Android/app/src/main/java/org/un1box/android/MainActivity.kt
++++ b/Android/app/src/main/java/org/un1box/android/MainActivity.kt
+@@ -174,6 +174,24 @@ class MainActivity : ComponentActivity(), SensorEventListener, GuestHost {
+     private val stockIpsw = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) importStockIpsw(uri) }
+     private val prepRom = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) importPrepRom(uri) }
+     private val preparedCopy = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> if (uri != null) addPreparedCopy(uri) }
++    private val pickOriginalLibrary = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> if (uri != null) transferFromOriginal(uri) }
++    override var transferStatus by mutableStateOf("")
++        private set
++    override fun importFromOriginal() { if (!busy && !active) pickOriginalLibrary.launch(null) }
++    private fun transferFromOriginal(uri: Uri) {
++        busy = true; transferStatus = "Reading the folder…"
++        val existing = devices.map { it.id }.toSet()
++        Thread({
++            try {
++                val report = DeviceTransfer.import(this, uri, existing) { text, fraction ->
++                    handler.post { transferStatus = if (fraction >= 0f) "$text ${(fraction * 100).toInt()}%" else text }
++                }
++                handler.post { notice = report.summary; transferStatus = ""; busy = false; refreshDevices() }
++            } catch (e: Exception) {
++                handler.post { error = e.message ?: "Import failed"; transferStatus = ""; busy = false }
++            }
++        }, "original-transfer").start()
++    }
+     private var active = false
+     private var displayOwnerTicket = 0L
+     private var displayResumed = false
+diff --git a/Android/app/src/main/java/org/un1box/android/SettingsScreen.kt b/Android/app/src/main/java/org/un1box/android/SettingsScreen.kt
+index da93538..a2ad844 100644
+--- a/Android/app/src/main/java/org/un1box/android/SettingsScreen.kt
++++ b/Android/app/src/main/java/org/un1box/android/SettingsScreen.kt
+@@ -5,7 +5,14 @@ import android.content.Intent
+ import android.net.Uri
+ import androidx.activity.compose.BackHandler
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.border
+ import androidx.compose.foundation.clickable
++import androidx.compose.foundation.horizontalScroll
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.semantics.contentDescription
++import androidx.compose.ui.semantics.role
++import androidx.compose.ui.semantics.selected
+ import androidx.compose.foundation.layout.*
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.shape.RoundedCornerShape
+@@ -54,7 +61,7 @@ internal fun SettingsScreen(host: GuestHost, onBack: () -> Unit) {
+                 Spacer(Modifier.width(14.dp))
+                 Column {
+                     Text("Settings", style = MaterialTheme.typography.headlineSmall)
+-                    Text(BuildConfig.VERSION_NAME.let { "Un1box $it" }, style = MaterialTheme.typography.labelSmall,
++                    Text(BuildConfig.VERSION_NAME.let { "Un1box Plus $it" }, style = MaterialTheme.typography.labelSmall,
+                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                 }
+             }
+@@ -86,6 +93,7 @@ internal fun SettingsScreen(host: GuestHost, onBack: () -> Unit) {
+                 // CameraCapture, the CAMERA permission) and docs/TODO.md says what it waits for.
+                 Group("Display") {
+                     ChoiceRow(LtIcons.Palette, "Theme", ThemeMode.entries, s.theme, { it.label }) { s.theme = it }
++                    AccentRow(s.accent) { s.accent = it }
+                     ChoiceRow(LtIcons.Layers, "Screen scaling", ScreenScaling.entries, s.scaling, { it.label },
+                         if (s.scaling == ScreenScaling.SMOOTH) "Filtered by the display hardware" else "Crisp pixels, then filtered to fit") { s.scaling = it; host.applySettings() }
+                     SwitchRow(LtIcons.Play, "Unpause when you return", "iOS pauses while Un1box is in the background, unless apps are installing. On, it carries on when you come back; off, it waits for you to tap Resume", s.autoResume) { s.autoResume = it }
+@@ -131,6 +139,9 @@ internal fun SettingsScreen(host: GuestHost, onBack: () -> Unit) {
+                 Group("Device") {
+                     ActionRow(LtIcons.Puzzle, "Update guest tools", host.selected?.let { "Install a newer .itpack into ${it.name}; it applies at the next start" } ?: "Select a device first",
+                         enabled = host.selected != null && !host.active && !host.busy) { host.pickGuestTools() }
++                    ActionRow(LtIcons.Download, "Import from Un1box",
++                        host.transferStatus.ifEmpty { "Bring over devices, with their apps and data, from the original Un1box. Pick its library folder" },
++                        enabled = !host.active && !host.busy, tag = "import_from_original") { host.importFromOriginal() }
+                     ActionRow(LtIcons.Download, "Prepare from an IPSW", "Choose a device and iOS version; Un1box downloads Apple's firmware and builds it here",
+                         enabled = !host.active && !host.busy) { host.openPreparation() }
+                 }
+@@ -149,6 +160,39 @@ internal fun SettingsScreen(host: GuestHost, onBack: () -> Unit) {
+     }
+ }
+ 
++/**
++ * Un1box Plus: pick the accent colour. A row of preset swatches, then a slider that walks the colour
++ * wheel for anything else. The whole app (buttons, switches, glow, device stage) follows live.
++ */
++@Composable
++private fun AccentRow(current: Int, onPick: (Int) -> Unit) {
++    var hue by remember { mutableFloatStateOf(AccentPalette.hue(current)) }
++    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp).testTag("accent_row")) {
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            RowIcon(LtIcons.Palette)
++            Column {
++                Text("Accent colour", style = MaterialTheme.typography.bodyLarge)
++                Text("Colours buttons, switches and the glow around the device", style = MaterialTheme.typography.bodySmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant)
++            }
++        }
++        Spacer(Modifier.height(10.dp))
++        Row(Modifier.fillMaxWidth().padding(start = 54.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
++            for ((name, argb) in AccentPalette.presets) {
++                val chosen = (current or 0xFF000000.toInt()) == argb
++                Box(Modifier.size(36.dp).clip(CircleShape).background(Color(argb))
++                    .then(if (chosen) Modifier.border(3.dp, MaterialTheme.colorScheme.onSurface, CircleShape) else Modifier.border(1.dp, MaterialTheme.colorScheme.outline, CircleShape))
++                    .clickable { hue = AccentPalette.hue(argb); onPick(argb) }.semantics { contentDescription = name; role = Role.RadioButton; selected = chosen }
++                    .testTag("accent_" + name.lowercase().replace(' ', '_')))
++            }
++        }
++        Slider(value = hue, onValueChange = { hue = it; onPick(AccentPalette.fromHue(it)) }, valueRange = 0f..360f,
++            modifier = Modifier.padding(start = 54.dp).testTag("accent_hue"))
++        Text("Drag for any other colour", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(start = 54.dp))
++    }
++}
++
+ /** One section: a quiet label, then a pane of glass holding its rows. */
+ @Composable
+ private fun Group(title: String, content: @Composable ColumnScope.() -> Unit) {
+diff --git a/Android/app/src/main/java/org/un1box/android/Shell.kt b/Android/app/src/main/java/org/un1box/android/Shell.kt
+index 8eb3cbe..8d7ab74 100644
+--- a/Android/app/src/main/java/org/un1box/android/Shell.kt
++++ b/Android/app/src/main/java/org/un1box/android/Shell.kt
+@@ -85,6 +85,10 @@ interface GuestHost {
+     val microphone: Boolean
+     fun useMicrophone(on: Boolean)
+     fun pickGuestTools()
++    /** Un1box Plus: copy saved devices and their storage from the original Un1box's library folder. */
++    fun importFromOriginal()
++    /** What that import is doing now ("" when idle), for Settings. */
++    val transferStatus: String
+     fun openLicenses()
+     fun openPreparation()
+     fun applySettings()
+diff --git a/Android/app/src/main/java/org/un1box/android/Theme.kt b/Android/app/src/main/java/org/un1box/android/Theme.kt
+index 2225339..9bd9d2a 100644
+--- a/Android/app/src/main/java/org/un1box/android/Theme.kt
++++ b/Android/app/src/main/java/org/un1box/android/Theme.kt
+@@ -10,7 +10,12 @@ import androidx.compose.material3.darkColorScheme
+ import androidx.compose.material3.lightColorScheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
+ import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.toArgb
+ import androidx.compose.ui.text.TextStyle
+ import androidx.compose.ui.text.font.FontFamily
+ import androidx.compose.ui.text.font.FontWeight
+@@ -23,9 +28,43 @@ import androidx.compose.ui.unit.sp
+  * screen never has two competing primary colours. Status colours stay flat and saturated: they
+  * are read at a glance, over glass, in sunlight.
+  */
++/**
++ * Un1box Plus: the accent is a user choice. One seed colour (saved in Settings) is the single source;
++ * every shade the chrome needs is derived from it, so any colour, preset or custom, stays readable.
++ * The seed is Compose state, so reading [LtColors.Accent] while composing or drawing follows a change live.
++ */
++internal object AccentPalette {
++    const val DEFAULT = 0xFF5FE0CB.toInt()
++    private val seedState = mutableIntStateOf(DEFAULT)
++    var seed: Int get() = seedState.intValue; set(v) { seedState.intValue = v or 0xFF000000.toInt() }
++
++    /** Named presets offered in Settings (the first is the original Un1box sea green). */
++    val presets: List<Pair<String, Int>> = listOf(
++        "Sea green" to 0xFF5FE0CB.toInt(), "Sky" to 0xFF5AB8FF.toInt(), "Violet" to 0xFF9A8CFF.toInt(),
++        "Pink" to 0xFFFF7BB0.toInt(), "Coral" to 0xFFFF8A6B.toInt(), "Amber" to 0xFFFFC46B.toInt(),
++        "Lime" to 0xFFA6E36B.toInt(), "Silver" to 0xFFC7CCD6.toInt())
++
++    private fun hsv(color: Int) = FloatArray(3).also { android.graphics.Color.colorToHSV(color, it) }
++    private fun fromHsv(h: Float, s: Float, v: Float) =
++        Color(android.graphics.Color.HSVToColor(floatArrayOf(((h % 360f) + 360f) % 360f, s.coerceIn(0f, 1f), v.coerceIn(0f, 1f))))
++
++    fun hue(color: Int): Float = hsv(color)[0]
++    fun fromHue(hue: Float): Int = fromHsv(hue, 0.62f, 0.92f).toArgb()
++    /** The seed lifted to a bright, legible tone for dark surfaces. */
++    fun bright(seed: Int): Color = hsv(seed).let { fromHsv(it[0], it[1].coerceIn(0.12f, 0.80f), maxOf(it[2], 0.88f)) }
++    /** The seed darkened until white text on it passes contrast; used on light surfaces. */
++    fun deep(seed: Int): Color = hsv(seed).let { fromHsv(it[0], maxOf(it[1], 0.55f).coerceAtMost(0.95f), 0.52f) }
++    fun container(seed: Int, dark: Boolean): Color = hsv(seed).let { if (dark) fromHsv(it[0], it[1].coerceAtMost(0.7f), 0.26f) else fromHsv(it[0], 0.16f, 0.97f) }
++    fun onContainer(seed: Int, dark: Boolean): Color = hsv(seed).let { if (dark) fromHsv(it[0], 0.18f, 0.97f) else fromHsv(it[0], 0.9f, 0.14f) }
++    /** Text on a filled accent button: near-black tinted with the hue, so it reads on any bright accent. */
++    fun onAccent(seed: Int): Color = hsv(seed).let { fromHsv(it[0], 0.9f, 0.18f) }
++    /** The gradient partner: the same colour turned 45 degrees round the wheel. */
++    fun partner(seed: Int): Color = hsv(bright(seed).toArgb()).let { fromHsv(it[0] + 45f, minOf(it[1] + 0.05f, 0.75f), 0.97f) }
++}
++
+ internal object LtColors {
+-    val Accent = Color(0xFF5FE0CB)
+-    val AccentDeep = Color(0xFF0E8271)
++    val Accent: Color get() = AccentPalette.bright(AccentPalette.seed)
++    val AccentDeep: Color get() = AccentPalette.deep(AccentPalette.seed)
+     val Violet = Color(0xFF9A8CFF)
+     val VioletDeep = Color(0xFF5B4BE0)
+     val Pink = Color(0xFFFF7BB0)
+@@ -43,14 +82,14 @@ internal object LtColors {
+ 
+ /** The two-stop gradients the chrome is built from: aurora behind, accent on the things you press. */
+ internal object LtGradients {
+-    val accent = listOf(LtColors.Accent, Color(0xFF4FB6E8))
++    val accent: List<Color> get() = listOf(LtColors.Accent, AccentPalette.partner(AccentPalette.seed))
+     val violet = listOf(LtColors.Violet, LtColors.Pink)
+-    val mixed = listOf(LtColors.Accent, LtColors.Violet)
++    val mixed: List<Color> get() = listOf(LtColors.Accent, AccentPalette.partner(AccentPalette.seed))
+ }
+ 
+-private val Dark = darkColorScheme(
+-    primary = LtColors.Accent, onPrimary = Color(0xFF00312B),
+-    primaryContainer = Color(0xFF113F3A), onPrimaryContainer = Color(0xFFBFF6EC),
++private fun darkScheme(seed: Int) = darkColorScheme(
++    primary = AccentPalette.bright(seed), onPrimary = AccentPalette.onAccent(seed),
++    primaryContainer = AccentPalette.container(seed, true), onPrimaryContainer = AccentPalette.onContainer(seed, true),
+     secondary = LtColors.Violet, onSecondary = Color(0xFF221A4D),
+     secondaryContainer = Color(0xFF2C2557), onSecondaryContainer = Color(0xFFE2DDFF),
+     tertiary = LtColors.Pink, onTertiary = Color(0xFF451027),
+@@ -65,9 +104,9 @@ private val Dark = darkColorScheme(
+     errorContainer = Color(0xFF4A1616), onErrorContainer = Color(0xFFFFDAD6),
+ )
+ 
+-private val Light = lightColorScheme(
+-    primary = LtColors.AccentDeep, onPrimary = Color.White,
+-    primaryContainer = Color(0xFFC6F0E6), onPrimaryContainer = Color(0xFF00201B),
++private fun lightScheme(seed: Int) = lightColorScheme(
++    primary = AccentPalette.deep(seed), onPrimary = Color.White,
++    primaryContainer = AccentPalette.container(seed, false), onPrimaryContainer = AccentPalette.onContainer(seed, false),
+     secondary = LtColors.VioletDeep, onSecondary = Color.White,
+     secondaryContainer = Color(0xFFE4E0FF), onSecondaryContainer = Color(0xFF17094F),
+     tertiary = Color(0xFFB3346E), onTertiary = Color.White,
+@@ -102,8 +141,10 @@ internal val MonoStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize =
+ 
+ /** Full screen is always dark: its menus sit on black around the guest. */
+ @Composable
+-internal fun DarkTheme(content: @Composable () -> Unit) = MaterialTheme(colorScheme = Dark, typography = Type,
+-    shapes = LtShapes) { OnBackground(content) }
++internal fun DarkTheme(content: @Composable () -> Unit) {
++    val seed = AccentPalette.seed
++    MaterialTheme(colorScheme = remember(seed) { darkScheme(seed) }, typography = Type, shapes = LtShapes) { OnBackground(content) }
++}
+ 
+ /** Screens drawn straight on the background, outside a Surface, still get readable text and icons. */
+ @Composable
+@@ -113,5 +154,7 @@ private fun OnBackground(content: @Composable () -> Unit) =
+ @Composable
+ internal fun Un1boxTheme(mode: ThemeMode, content: @Composable () -> Unit) {
+     val dark = when (mode) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
+-    MaterialTheme(colorScheme = if (dark) Dark else Light, typography = Type, shapes = LtShapes) { OnBackground(content) }
++    val seed = AccentPalette.seed
++    val scheme = remember(seed, dark) { if (dark) darkScheme(seed) else lightScheme(seed) }
++    MaterialTheme(colorScheme = scheme, typography = Type, shapes = LtShapes) { OnBackground(content) }
+ }
+diff --git a/Android/app/src/test/java/org/un1box/android/DeviceTransferTest.kt b/Android/app/src/test/java/org/un1box/android/DeviceTransferTest.kt
+new file mode 100644
+index 0000000..a6b090c
+--- /dev/null
++++ b/Android/app/src/test/java/org/un1box/android/DeviceTransferTest.kt
+@@ -0,0 +1,13 @@
++package org.un1box.android
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class DeviceTransferTest {
++    @Test fun summaryNamesWhatHappened() {
++        assertEquals("Nothing new to import", DeviceTransfer.Report(emptyList(), 0, emptyList()).summary)
++        assertEquals("Imported iPod touch 2G", DeviceTransfer.Report(listOf("iPod touch 2G"), 0, emptyList()).summary)
++        assertEquals("Imported 2 devices · 1 already here", DeviceTransfer.Report(listOf("a", "b"), 1, emptyList()).summary)
++        assertEquals("Nothing new to import · 1 failed: x (bad)", DeviceTransfer.Report(emptyList(), 0, listOf("x (bad)")).summary)
++    }
++}
+diff --git a/tools/export-from-original.sh b/tools/export-from-original.sh
+new file mode 100755
+index 0000000..0754a10
+--- /dev/null
++++ b/tools/export-from-original.sh
+@@ -0,0 +1,28 @@
++#!/bin/sh
++# Copies the original Un1box's device library off a phone, ready for Un1box Plus > Settings > Import from Un1box.
++#
++# Android keeps each app's files private, so this needs one of:
++#   - the original is a debuggable build (run-as works), or
++#   - the phone is rooted (su works).
++# Neither? Build Un1box Plus with -PreplaceOriginal=true instead and install it over the original
++# (same signing key required): the devices are then already there, nothing to copy.
++#
++# Usage: tools/export-from-original.sh [OUT_DIR]      (default: ./un1box-library)
++#        then copy OUT_DIR to the phone and pick it in Un1box Plus.
++# Stop any running device in the original first, so its storage is not copied mid-write.
++set -eu
++PKG="${ORIGINAL_PACKAGE:-org.un1box.android}"
++OUT="${1:-un1box-library}"
++command -v adb >/dev/null || { echo "adb not found" >&2; exit 1; }
++mkdir -p "$OUT"
++if adb exec-out run-as "$PKG" tar -C files -cf - library 2>/dev/null | tar -xf - -C "$OUT" 2>/dev/null && [ -d "$OUT/library/records" ]; then
++  echo "Copied with run-as."
++elif adb exec-out su -c "tar -C /data/data/$PKG/files -cf - library" 2>/dev/null | tar -xf - -C "$OUT" 2>/dev/null && [ -d "$OUT/library/records" ]; then
++  echo "Copied with root."
++else
++  echo "Could not read $PKG's files (not debuggable, no root). See the note at the top of this script." >&2
++  exit 1
++fi
++echo "Library is in $OUT/library. Push it to the phone, e.g.:"
++echo "  adb push $OUT/library /sdcard/Download/un1box-library"
++echo "then in Un1box Plus: Settings > Import from Un1box > pick that folder."
